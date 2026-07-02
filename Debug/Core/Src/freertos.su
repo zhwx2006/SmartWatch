@@ -1,0 +1,6 @@
+../Core/Src/freertos.c:75:6:vApplicationGetIdleTaskMemory	24	static
+../Core/Src/freertos.c:89:6:MX_FREERTOS_Init	136	static
+../Core/Src/freertos.c:144:6:StartTaskDisplay	16	static
+../Core/Src/freertos.c:162:6:StartTaskSensor	16	static
+../Core/Src/freertos.c:180:6:StartTaskBluetooth	16	static
+../Core/Src/freertos.c:198:6:StartTaskEncoder	16	static

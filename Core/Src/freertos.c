@@ -46,11 +46,19 @@
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
 
+/* 外部引用 main.c 中定义的互斥锁句柄（硬件文档 第六节） */
+extern SemaphoreHandle_t xI2CMutex;
+
 /* USER CODE END Variables */
-osThreadId Task_DisplayHandle;
+
+/* 任务句柄（必须与 CubeMX 中创建的任务名称一致） */
+osThreadId Task_TimeHandle;
+osThreadId Task_KeyHandle;
 osThreadId Task_SensorHandle;
+osThreadId Task_UIHandle;
 osThreadId Task_BluetoothHandle;
-osThreadId Task_KeyEncoderHandle;
+
+/* 互斥锁句柄（CubeMX 中创建） */
 osMutexId I2C_MutexHandle;
 
 /* Private function prototypes -----------------------------------------------*/
@@ -58,12 +66,14 @@ osMutexId I2C_MutexHandle;
 
 /* USER CODE END FunctionPrototypes */
 
-void StartTaskDisplay(void const * argument);
-void StartTaskSensor(void const * argument);
-void StartTaskBluetooth(void const * argument);
-void StartTaskEncoder(void const * argument);
+/* 任务函数声明（与 main.c 中实现的函数匹配） */
+void StartTimeTask(void const * argument);
+void StartKeyTask(void const * argument);
+void StartSensorTask(void const * argument);
+void StartUITask(void const * argument);
+void StartBluetoothTask(void const * argument);
 
-void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
+void MX_FREERTOS_Init(void);
 
 /* GetIdleTaskMemory prototype (linked to static allocation support) */
 void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer, StackType_t **ppxIdleTaskStackBuffer, uint32_t *pulIdleTaskStackSize );
@@ -77,7 +87,6 @@ void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer, StackTy
   *ppxIdleTaskTCBBuffer = &xIdleTaskTCBBuffer;
   *ppxIdleTaskStackBuffer = &xIdleStack[0];
   *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
-  /* place for user code */
 }
 /* USER CODE END GET_IDLE_TASK_MEMORY */
 
@@ -90,8 +99,10 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
-  /* Create the mutex(es) */
-  /* definition and creation of I2C_Mutex */
+
+  /* ============================================================
+     创建互斥锁（硬件文档 第六节）
+     ============================================================ */
   osMutexDef(I2C_Mutex);
   I2C_MutexHandle = osMutexCreate(osMutex(I2C_Mutex));
 
@@ -111,22 +122,29 @@ void MX_FREERTOS_Init(void) {
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
 
-  /* Create the thread(s) */
-  /* definition and creation of Task_Display */
-  osThreadDef(Task_Display, StartTaskDisplay, osPriorityLow, 0, 128);
-  Task_DisplayHandle = osThreadCreate(osThread(Task_Display), NULL);
+  /* ============================================================
+     创建 5 个任务（硬件文档 第五节）
+     ============================================================ */
 
-  /* definition and creation of Task_Sensor */
-  osThreadDef(Task_Sensor, StartTaskSensor, osPriorityNormal, 0, 128);
+  /* 任务1: 时间任务 (周期 1000ms，优先级 Normal) */
+  osThreadDef(Task_Time, StartTimeTask, osPriorityNormal, 0, 128);
+  Task_TimeHandle = osThreadCreate(osThread(Task_Time), NULL);
+
+  /* 任务2: 按键/编码器任务 (周期 10ms，优先级 High) */
+  osThreadDef(Task_Key, StartKeyTask, osPriorityHigh, 0, 128);
+  Task_KeyHandle = osThreadCreate(osThread(Task_Key), NULL);
+
+  /* 任务3: 传感器任务 (周期 100ms，优先级 High) */
+  osThreadDef(Task_Sensor, StartSensorTask, osPriorityNormal, 0, 128);
   Task_SensorHandle = osThreadCreate(osThread(Task_Sensor), NULL);
 
-  /* definition and creation of Task_Bluetooth */
-  osThreadDef(Task_Bluetooth, StartTaskBluetooth, osPriorityNormal, 0, 256);
-  Task_BluetoothHandle = osThreadCreate(osThread(Task_Bluetooth), NULL);
+  /* 任务4: UI 显示任务 (周期 200ms，优先级 Normal) */
+  osThreadDef(Task_UI, StartUITask, osPriorityNormal, 0, 128);
+  Task_UIHandle = osThreadCreate(osThread(Task_UI), NULL);
 
-  /* definition and creation of Task_KeyEncoder */
-  osThreadDef(Task_KeyEncoder, StartTaskEncoder, osPriorityHigh, 0, 128);
-  Task_KeyEncoderHandle = osThreadCreate(osThread(Task_KeyEncoder), NULL);
+  /* 任务5: 蓝牙任务 (周期 500ms，优先级 Low) */
+  osThreadDef(Task_Bluetooth, StartBluetoothTask, osPriorityLow, 0, 256);
+  Task_BluetoothHandle = osThreadCreate(osThread(Task_Bluetooth), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -134,80 +152,91 @@ void MX_FREERTOS_Init(void) {
 
 }
 
-/* USER CODE BEGIN Header_StartTaskDisplay */
+/* ============================================================
+   任务函数体（调用 main.c 中已实现的具体逻辑）
+   ============================================================ */
+
+/* USER CODE BEGIN Header_StartTimeTask */
 /**
-  * @brief  Function implementing the Task_Display thread.
+  * @brief  Function implementing the Task_Time thread.
   * @param  argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartTaskDisplay */
-void StartTaskDisplay(void const * argument)
+/* USER CODE END Header_StartTimeTask */
+void StartTimeTask(void const * argument)
 {
-  /* USER CODE BEGIN StartTaskDisplay */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END StartTaskDisplay */
+  /* USER CODE BEGIN StartTimeTask */
+  /* 调用 main.c 中实现的时间任务 */
+  extern void StartTimeTask_Impl(void *argument);
+  StartTimeTask_Impl((void*)argument);
+  /* USER CODE END StartTimeTask */
 }
 
-/* USER CODE BEGIN Header_StartTaskSensor */
+/* USER CODE BEGIN Header_StartKeyTask */
 /**
-* @brief Function implementing the Task_Sensor thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTaskSensor */
-void StartTaskSensor(void const * argument)
+  * @brief  Function implementing the Task_Key thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartKeyTask */
+void StartKeyTask(void const * argument)
 {
-  /* USER CODE BEGIN StartTaskSensor */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END StartTaskSensor */
+  /* USER CODE BEGIN StartKeyTask */
+  /* 调用 main.c 中实现的按键/编码器任务 */
+  extern void StartKeyTask_Impl(void *argument);
+  StartKeyTask_Impl((void*)argument);
+  /* USER CODE END StartKeyTask */
 }
 
-/* USER CODE BEGIN Header_StartTaskBluetooth */
+/* USER CODE BEGIN Header_StartSensorTask */
 /**
-* @brief Function implementing the Task_Bluetooth thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTaskBluetooth */
-void StartTaskBluetooth(void const * argument)
+  * @brief  Function implementing the Task_Sensor thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartSensorTask */
+void StartSensorTask(void const * argument)
 {
-  /* USER CODE BEGIN StartTaskBluetooth */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END StartTaskBluetooth */
+  /* USER CODE BEGIN StartSensorTask */
+  /* 调用 main.c 中实现的传感器任务 */
+  extern void StartSensorTask_Impl(void *argument);
+  StartSensorTask_Impl((void*)argument);
+  /* USER CODE END StartSensorTask */
 }
 
-/* USER CODE BEGIN Header_StartTaskEncoder */
+/* USER CODE BEGIN Header_StartUITask */
 /**
-* @brief Function implementing the Task_KeyEncoder thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTaskEncoder */
-void StartTaskEncoder(void const * argument)
+  * @brief  Function implementing the Task_UI thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartUITask */
+void StartUITask(void const * argument)
 {
-  /* USER CODE BEGIN StartTaskEncoder */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END StartTaskEncoder */
+  /* USER CODE BEGIN StartUITask */
+  /* 调用 main.c 中实现的 UI 显示任务 */
+  extern void StartUITask_Impl(void *argument);
+  StartUITask_Impl((void*)argument);
+  /* USER CODE END StartUITask */
+}
+
+/* USER CODE BEGIN Header_StartBluetoothTask */
+/**
+  * @brief  Function implementing the Task_Bluetooth thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartBluetoothTask */
+void StartBluetoothTask(void const * argument)
+{
+  /* USER CODE BEGIN StartBluetoothTask */
+  /* 调用 main.c 中实现的蓝牙任务 */
+  extern void StartBluetoothTask_Impl(void *argument);
+  StartBluetoothTask_Impl((void*)argument);
+  /* USER CODE END StartBluetoothTask */
 }
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
 /* USER CODE END Application */
-
