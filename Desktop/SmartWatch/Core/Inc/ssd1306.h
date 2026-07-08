@@ -1,0 +1,24 @@
+#ifndef SSD1306_H
+#define SSD1306_H
+
+#include "main.h"
+
+// I2C 从机地址（7位地址 0x3C，左移1位后为 0x78）
+#define SSD1306_ADDR    0x3C
+
+// 屏幕尺寸
+#define SSD1306_WIDTH   128
+#define SSD1306_HEIGHT  64
+#define SSD1306_PAGES   8   // 64 / 8
+
+// 基本函数
+void SSD1306_Init(void);
+void SSD1306_Clear(void);
+void SSD1306_SetCursor(uint8_t x, uint8_t page);
+void SSD1306_WriteChar(char ch);
+void SSD1306_WriteString(char *str);
+
+// ★★★ 关键：必须声明，供 main.c 调用 ★★★
+void SSD1306_WriteCmd(uint8_t cmd);
+
+#endif

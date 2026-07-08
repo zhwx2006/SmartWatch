@@ -1,0 +1,733 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Phase 5 - FreeRTOS + Multi-level Menu + Power Management
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "cmsis_os.h"
+#include "i2c.h"
+#include "tim.h"
+#include "usart.h"
+#include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "ssd1306.h"
+#include "mpu6050.h"
+#include "bluetooth.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+/* 所有结构体定义已移至 main.h，此处留空 */
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#define MENU_TIMEOUT_MS     10000   // 10秒无操作熄屏
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+
+/* USER CODE BEGIN PV */
+
+// 外部 FreeRTOS 句柄
+extern osMessageQId queueSensorDataHandle;
+extern osMessageQId queueSensorDataBtHandle;
+extern osMessageQId queueTimeUpdateHandle;
+extern osMessageQId queueMenuMsgHandle;
+extern osMutexId mutexI2CHandle;
+extern osSemaphoreId semDisplayUpdateHandle;
+
+// ============================================================
+// 叶子节点动作函数声明
+// ============================================================
+static void MenuAction_ShowTime(void);
+static void MenuAction_ShowSensor(void);
+static void MenuAction_ShowSport(void);
+static void MenuAction_ShowSystem(void);
+static void MenuAction_SetTime(void);
+static void MenuAction_ResetSteps(void);
+static void MenuAction_About(void);
+
+// 前向声明子菜单
+static const MenuItem_t menuTime[];
+static const MenuItem_t menuSensor[];
+static const MenuItem_t menuSport[];
+static const MenuItem_t menuSettings[];
+static const MenuItem_t menuSystem[];
+
+// ============================================================
+// 定义菜单树（每个数组必须有 NULL 终止符）
+// ============================================================
+
+static const MenuItem_t menuMain[] = {
+    {"Time",       3, menuTime,   NULL},
+    {"Sensor",     3, menuSensor, NULL},
+    {"Sport",      3, menuSport,  NULL},
+    {"Settings",   4, menuSettings, NULL},
+    {"System",     3, menuSystem, NULL},
+    {NULL,         0, NULL,       NULL}
+};
+
+static const MenuItem_t menuTime[] = {
+    {"Current Time", 0, NULL, MenuAction_ShowTime},
+    {"Date",         0, NULL, NULL},
+    {"Step Count",   0, NULL, NULL},
+    {NULL,           0, NULL, NULL}
+};
+
+static const MenuItem_t menuSensor[] = {
+    {"Attitude",    0, NULL, MenuAction_ShowSensor},
+    {"Accel",       0, NULL, NULL},
+    {"Temperature", 0, NULL, NULL},
+    {NULL,          0, NULL, NULL}
+};
+
+static const MenuItem_t menuSport[] = {
+    {"Today Steps", 0, NULL, MenuAction_ShowSport},
+    {"Distance",    0, NULL, NULL},
+    {"Calorie",     0, NULL, NULL},
+    {NULL,          0, NULL, NULL}
+};
+
+static const MenuItem_t menuSettings[] = {
+    {"Set Time",    0, NULL, MenuAction_SetTime},
+    {"BT Pair",     0, NULL, NULL},
+    {"Reset Steps", 0, NULL, MenuAction_ResetSteps},
+    {"About",       0, NULL, MenuAction_About},
+    {NULL,          0, NULL, NULL}
+};
+
+static const MenuItem_t menuSystem[] = {
+    {"Battery",     0, NULL, MenuAction_ShowSystem},
+    {"Firmware",    0, NULL, NULL},
+    {"BT MAC",      0, NULL, NULL},
+    {NULL,          0, NULL, NULL}
+};
+
+// ============================================================
+// 定义全局状态
+// ============================================================
+Page_t currentPage = PAGE_TIME;
+
+MenuState_t menuState = {
+    .current_menu = NULL,
+    .current_item = 0,
+    .depth = 0,
+    .prev_item = 0,
+    .edit_mode = 0,
+    .edit_value = 0
+};
+
+static uint8_t screen_off = 0;
+static uint32_t last_activity_time = 0;
+static uint8_t force_refresh_now = 0;
+
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+void MX_FREERTOS_Init(void);
+/* USER CODE BEGIN PFP */
+
+void RenderPage(TimeData_t *time, SensorData_t *sensor);
+void ProcessMenu(MenuMsg_t *msg);
+void RenderMenu(void);
+void ProcessMenuEvent(MenuEvent_t event);
+
+void vTask_TimeKeep(void const *argument);
+void vTask_Sensor(void const *argument);
+void vTask_Display(void const *argument);
+void vTask_Menu(void const *argument);
+void vTask_Bluetooth(void const *argument);
+
+static char* FloatToStrInt(float val) {
+    static char buf[16];
+    int int_part = (int)val;
+    int dec_part = (int)((val - int_part) * 10);
+    if (dec_part < 0) dec_part = -dec_part;
+    if (val < 0 && int_part == 0) {
+        sprintf(buf, "-0.%d", dec_part);
+    } else {
+        sprintf(buf, "%d.%d", int_part, dec_part);
+    }
+    return buf;
+}
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+// ============================================================
+// 叶子节点动作函数
+// ============================================================
+static void MenuAction_ShowTime(void) {
+    currentPage = PAGE_TIME;
+    menuState.current_menu = NULL;
+    force_refresh_now = 1;
+}
+
+static void MenuAction_ShowSensor(void) {
+    currentPage = PAGE_SENSOR;
+    menuState.current_menu = NULL;
+    force_refresh_now = 1;
+}
+
+static void MenuAction_ShowSport(void) {
+    currentPage = PAGE_SPORT;
+    menuState.current_menu = NULL;
+    force_refresh_now = 1;
+}
+
+static void MenuAction_ShowSystem(void) {
+    currentPage = PAGE_SYSTEM;
+    menuState.current_menu = NULL;
+    force_refresh_now = 1;
+}
+
+static void MenuAction_SetTime(void) {
+    menuState.edit_mode = 1;
+    menuState.current_menu = NULL;
+    force_refresh_now = 1;
+}
+
+static void MenuAction_ResetSteps(void) {
+    SensorData_t reset_sensor = {0};
+    reset_sensor.steps = 0;
+    xQueueSend(queueSensorDataHandle, &reset_sensor, 0);
+    menuState.current_menu = NULL;
+    currentPage = PAGE_TIME;
+    force_refresh_now = 1;
+}
+
+static void MenuAction_About(void) {
+    menuState.current_menu = NULL;
+    currentPage = PAGE_TIME;
+    force_refresh_now = 1;
+}
+
+// ============================================================
+// 多级菜单渲染
+// ============================================================
+void RenderMenu(void) {
+    uint8_t i, count;
+    const MenuItem_t *menu = menuState.current_menu;
+
+    if (menu == NULL) {
+        return;
+    }
+
+    count = 0;
+    while (menu[count].name != NULL && count < 10) {
+        count++;
+    }
+
+    if (count == 0) {
+        return;
+    }
+
+    SSD1306_Clear();
+
+    // 标题
+    SSD1306_SetCursor(0, 0);
+    if (menuState.depth == 0) {
+        SSD1306_WriteString("Main Menu");
+    } else {
+        for (i = 0; i < menuState.depth; i++) {
+            SSD1306_WriteString("  ");
+        }
+        SSD1306_WriteString("Menu");
+    }
+    SSD1306_SetCursor(0, 8);
+    SSD1306_WriteString("----------------");
+
+    // 菜单项
+    for (i = 0; i < count; i++) {
+        SSD1306_SetCursor(2, 16 + i * 8);
+        if (i == menuState.current_item) {
+            SSD1306_WriteString(">");
+        } else {
+            SSD1306_WriteString(" ");
+        }
+        SSD1306_WriteString((char*)menu[i].name);
+        if (menu[i].sub_items > 0) {
+            SSD1306_WriteString(" →");
+        }
+    }
+
+    // 底部提示
+    SSD1306_SetCursor(0, 56);
+    SSD1306_WriteString("OK:Enter L:Back");
+}
+
+// ============================================================
+// 菜单事件处理
+// ============================================================
+void ProcessMenuEvent(MenuEvent_t event) {
+    const MenuItem_t *menu = menuState.current_menu;
+    uint8_t count = 0;
+
+    if (menu == NULL) {
+        return;
+    }
+
+    while (menu[count].name != NULL && count < 10) count++;
+
+    switch (event) {
+        case MENU_EVENT_NEXT:
+            menuState.current_item = (menuState.current_item + 1) % count;
+            force_refresh_now = 1;
+            break;
+        case MENU_EVENT_PREV:
+            menuState.current_item = (menuState.current_item + count - 1) % count;
+            force_refresh_now = 1;
+            break;
+        case MENU_EVENT_ENTER: {
+            const MenuItem_t *item = &menu[menuState.current_item];
+            if (item->sub_items > 0 && item->sub_menu != NULL) {
+                menuState.current_menu = item->sub_menu;
+                menuState.prev_item = menuState.current_item;
+                menuState.depth++;
+                menuState.current_item = 0;
+                force_refresh_now = 1;
+            } else if (item->action != NULL) {
+                item->action();
+                force_refresh_now = 1;
+            }
+            break;
+        }
+        case MENU_EVENT_BACK:
+            if (menuState.depth > 0) {
+                if (menuState.depth == 1) {
+                    menuState.current_menu = menuMain;
+                } else {
+                    menuState.current_menu = menuMain;
+                }
+                menuState.depth--;
+                menuState.current_item = menuState.prev_item;
+                force_refresh_now = 1;
+            } else {
+                menuState.current_menu = NULL;
+                menuState.depth = 0;
+                menuState.current_item = 0;
+                currentPage = PAGE_TIME;
+                force_refresh_now = 1;
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+// ============================================================
+// 菜单消息处理
+// ============================================================
+void ProcessMenu(MenuMsg_t *msg) {
+    MenuEvent_t event = MENU_EVENT_NONE;
+
+    last_activity_time = HAL_GetTick();
+
+    if (msg->encoder_delta > 0) {
+        event = MENU_EVENT_NEXT;
+    } else if (msg->encoder_delta < 0) {
+        event = MENU_EVENT_PREV;
+    } else if (msg->button_event == 1) {
+        event = MENU_EVENT_ENTER;
+    } else if (msg->button_event == 2) {
+        event = MENU_EVENT_BACK;
+    }
+
+    if (event != MENU_EVENT_NONE) {
+        if (menuState.current_menu != NULL) {
+            ProcessMenuEvent(event);
+        } else {
+            if (event == MENU_EVENT_ENTER) {
+                menuState.current_menu = menuMain;
+                menuState.current_item = currentPage;
+                menuState.depth = 0;
+                menuState.edit_mode = 0;
+                force_refresh_now = 1;
+            } else if (event == MENU_EVENT_NEXT) {
+                currentPage = (currentPage + 1) % PAGE_COUNT;
+                force_refresh_now = 1;
+            } else if (event == MENU_EVENT_PREV) {
+                currentPage = (currentPage + PAGE_COUNT - 1) % PAGE_COUNT;
+                force_refresh_now = 1;
+            }
+        }
+    }
+}
+
+// ============================================================
+// 页面渲染
+// ============================================================
+void RenderPage(TimeData_t *time, SensorData_t *sensor) {
+    char buf[24];
+
+    if (menuState.current_menu != NULL) {
+        RenderMenu();
+        return;
+    }
+
+    SSD1306_Clear();
+
+    switch (currentPage) {
+        case PAGE_TIME:
+            SSD1306_SetCursor(0, 0); SSD1306_WriteString("SmartWatch");
+            SSD1306_SetCursor(0, 2);
+            sprintf(buf, "Time:%02d:%02d:%02d", time->hour, time->min, time->sec);
+            SSD1306_WriteString(buf);
+            SSD1306_SetCursor(0, 4);
+            sprintf(buf, "Steps:%lu", sensor->steps);
+            SSD1306_WriteString(buf);
+            SSD1306_SetCursor(0, 6);
+            sprintf(buf, "BT:%s", Bluetooth_IsConnected() ? "OK" : "NO");
+            SSD1306_WriteString(buf);
+            break;
+
+        case PAGE_SENSOR:
+            SSD1306_SetCursor(0, 0); SSD1306_WriteString("--- Sensor ---");
+            SSD1306_SetCursor(0, 2);
+            sprintf(buf, "AX:%s", FloatToStrInt(sensor->accel_x));
+            SSD1306_WriteString(buf);
+            SSD1306_SetCursor(0, 3);
+            sprintf(buf, "AY:%s", FloatToStrInt(sensor->accel_y));
+            SSD1306_WriteString(buf);
+            SSD1306_SetCursor(0, 4);
+            sprintf(buf, "AZ:%s", FloatToStrInt(sensor->accel_z));
+            SSD1306_WriteString(buf);
+            SSD1306_SetCursor(0, 6);
+            sprintf(buf, "Steps:%lu", sensor->steps);
+            SSD1306_WriteString(buf);
+            break;
+
+        case PAGE_SPORT:
+            SSD1306_SetCursor(0, 0); SSD1306_WriteString("--- Sport ---");
+            SSD1306_SetCursor(0, 2);
+            sprintf(buf, "Steps:%lu", sensor->steps);
+            SSD1306_WriteString(buf);
+            SSD1306_SetCursor(0, 4);
+            uint32_t dist_m = sensor->steps * 8 / 10;
+            sprintf(buf, "Dist:%lu.%1lum", dist_m / 10, dist_m % 10);
+            SSD1306_WriteString(buf);
+            break;
+
+        case PAGE_SYSTEM:
+            SSD1306_SetCursor(0, 0); SSD1306_WriteString("--- System ---");
+            SSD1306_SetCursor(0, 2);
+            sprintf(buf, "Temp:%sC", FloatToStrInt(sensor->temp));
+            SSD1306_WriteString(buf);
+            SSD1306_SetCursor(0, 4); SSD1306_WriteString("I2C:OK");
+            SSD1306_SetCursor(0, 6); SSD1306_WriteString("UART:OK");
+            break;
+
+        default:
+            break;
+    }
+}
+
+/* USER CODE END 0 */
+
+// ============================================================
+// 主函数
+// ============================================================
+int main(void)
+{
+  HAL_Init();
+  SystemClock_Config();
+
+  MX_GPIO_Init();
+  MX_I2C1_Init();
+  MX_USART1_UART_Init();
+  MX_TIM2_Init();
+  MX_TIM3_Init();
+  MX_I2C2_Init();
+
+  /* USER CODE BEGIN 2 */
+  char start_msg[] = "\r\n=== SmartWatch Phase 5 ===\r\n";
+  HAL_UART_Transmit(&huart1, (uint8_t*)start_msg, strlen(start_msg), 100);
+
+  SSD1306_Init();
+  SSD1306_Clear();
+  SSD1306_SetCursor(0, 0);
+  SSD1306_WriteString("Phase5 Starting");
+
+  if (MPU6050_Init() == 1) {
+      SSD1306_SetCursor(0, 2);
+      SSD1306_WriteString("MPU6050 OK");
+      HAL_UART_Transmit(&huart1, (uint8_t*)"MPU6050 Init OK\r\n", 18, 100);
+  } else {
+      SSD1306_SetCursor(0, 2);
+      SSD1306_WriteString("MPU6050 FAIL");
+      HAL_UART_Transmit(&huart1, (uint8_t*)"MPU6050 Init FAIL\r\n", 20, 100);
+      while(1);
+  }
+
+  Bluetooth_Init();
+  SSD1306_SetCursor(0, 4);
+  SSD1306_WriteString("Bluetooth OK");
+  HAL_UART_Transmit(&huart1, (uint8_t*)"Bluetooth Init OK\r\n", 20, 100);
+
+  HAL_Delay(1000);
+  SSD1306_Clear();
+
+  HAL_TIM_Base_Start_IT(&htim2);
+  HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
+
+  last_activity_time = HAL_GetTick();
+
+  /* USER CODE END 2 */
+
+  MX_FREERTOS_Init();
+  osKernelStart();
+
+  while (1) {}
+}
+
+// ============================================================
+// System Clock Configuration
+// ============================================================
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
+
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) Error_Handler();
+}
+
+/* USER CODE BEGIN 4 */
+
+void vTask_TimeKeep(void const *argument) {
+    TimeData_t time = {0, 0, 0};
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    for (;;) {
+        time.sec++;
+        if (time.sec >= 60) { time.sec = 0; time.min++; }
+        if (time.min >= 60) { time.min = 0; time.hour++; }
+        if (time.hour >= 24) time.hour = 0;
+
+        if (xQueueSend(queueTimeUpdateHandle, &time, 0) != pdPASS) {
+            HAL_UART_Transmit(&huart1, (uint8_t*)"TIME SEND FAIL\r\n", 17, 100);
+        }
+
+        xSemaphoreGive(semDisplayUpdateHandle);
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
+    }
+}
+
+void vTask_Sensor(void const *argument) {
+    SensorData_t sensor = {0};
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    MPU6050_Data raw;
+    char dbg[64];
+    uint8_t read_ok = 0;
+
+    for (;;) {
+        read_ok = 0;
+        osStatus mutex_status = osMutexWait(mutexI2CHandle, osWaitForever);
+        if (mutex_status == osOK) {
+            MPU6050_ReadAll(&raw);
+            sensor.steps = MPU6050_GetSteps();
+            osMutexRelease(mutexI2CHandle);
+            read_ok = 1;
+        }
+
+        if (read_ok) {
+            sensor.accel_x = raw.accel_x;
+            sensor.accel_y = raw.accel_y;
+            sensor.accel_z = raw.accel_z;
+            sensor.pitch = raw.pitch;
+            sensor.roll = raw.roll;
+            sensor.temp = raw.temp;
+
+            static uint8_t print_cnt = 0;
+            print_cnt++;
+            if (print_cnt % 5 == 0) {
+                int ax_int = (int)(sensor.accel_x * 10);
+                int ay_int = (int)(sensor.accel_y * 10);
+                int az_int = (int)(sensor.accel_z * 10);
+                sprintf(dbg, "SENS: AX=%d.%d AY=%d.%d AZ=%d.%d STEPS=%lu\r\n",
+                        ax_int/10, abs(ax_int%10),
+                        ay_int/10, abs(ay_int%10),
+                        az_int/10, abs(az_int%10),
+                        sensor.steps);
+                HAL_UART_Transmit(&huart1, (uint8_t*)dbg, strlen(dbg), 100);
+            }
+        } else {
+            HAL_UART_Transmit(&huart1, (uint8_t*)"MUTEX FAIL\r\n", 12, 100);
+        }
+
+        xQueueSend(queueSensorDataHandle, &sensor, 0);
+        xQueueSend(queueSensorDataBtHandle, &sensor, 0);
+        xSemaphoreGive(semDisplayUpdateHandle);
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(50));
+    }
+}
+
+// ============================================================
+// vTask_Display：刷新率 100ms
+// ============================================================
+void vTask_Display(void const *argument) {
+    TimeData_t time = {0, 0, 0};
+    SensorData_t sensor = {0};
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xMinRefreshPeriod = pdMS_TO_TICKS(100);   // ★ 100ms 刷新
+
+    for (;;) {
+        uint8_t should_refresh = 0;
+
+        // 信号量等待超时 100ms
+        if (xSemaphoreTake(semDisplayUpdateHandle, pdMS_TO_TICKS(100)) == pdTRUE) {
+            xQueueReceive(queueTimeUpdateHandle, &time, 0);
+            xQueueReceive(queueSensorDataHandle, &sensor, 0);
+            should_refresh = 1;
+        }
+
+        if (force_refresh_now) {
+            force_refresh_now = 0;
+            should_refresh = 1;
+        }
+
+        TickType_t now = xTaskGetTickCount();
+        if (screen_off == 0 && (should_refresh || (now - xLastWakeTime) >= xMinRefreshPeriod)) {
+            // 定时刷新时主动读取最新数据（非阻塞）
+            if (!should_refresh) {
+                xQueueReceive(queueTimeUpdateHandle, &time, 0);
+                xQueueReceive(queueSensorDataHandle, &sensor, 0);
+            }
+            if (osMutexWait(mutexI2CHandle, osWaitForever) == osOK) {
+                RenderPage(&time, &sensor);
+                osMutexRelease(mutexI2CHandle);
+            }
+            xLastWakeTime = now;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void vTask_Menu(void const *argument) {
+    MenuMsg_t msg = {0, 0};
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    uint8_t last_btn_state = 1;
+    uint32_t btn_press_start = 0;
+
+    for (;;) {
+        int16_t current_count = (int16_t)TIM3->CNT;
+        if (current_count != 0) {
+            TIM3->CNT = 0;
+            msg.encoder_delta = current_count;
+        } else {
+            msg.encoder_delta = 0;
+        }
+
+        uint8_t btn_state = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_10);
+        if (btn_state == 0 && last_btn_state == 1) {
+            btn_press_start = HAL_GetTick();
+        } else if (btn_state == 1 && last_btn_state == 0) {
+            uint32_t press_duration = HAL_GetTick() - btn_press_start;
+            if (press_duration > 1000) msg.button_event = 2;
+            else if (press_duration > 30) msg.button_event = 1;
+            else msg.button_event = 0;
+        } else {
+            msg.button_event = 0;
+        }
+        last_btn_state = btn_state;
+
+        if (msg.encoder_delta != 0 || msg.button_event != 0) {
+            ProcessMenu(&msg);
+        }
+
+        uint32_t now = HAL_GetTick();
+        if (!screen_off && (now - last_activity_time) > MENU_TIMEOUT_MS) {
+            screen_off = 1;
+            if (osMutexWait(mutexI2CHandle, osWaitForever) == osOK) {
+                SSD1306_WriteCmd(0xAE);
+                osMutexRelease(mutexI2CHandle);
+            }
+        }
+
+        if (screen_off && (msg.encoder_delta != 0 || msg.button_event != 0)) {
+            screen_off = 0;
+            if (osMutexWait(mutexI2CHandle, osWaitForever) == osOK) {
+                SSD1306_WriteCmd(0xAF);
+                osMutexRelease(mutexI2CHandle);
+            }
+            force_refresh_now = 1;
+        }
+
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(20));
+    }
+}
+
+void vTask_Bluetooth(void const *argument) {
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    TimeData_t time = {0, 0, 0};
+    SensorData_t sensor = {0};
+
+    for (;;) {
+        Bluetooth_ProcessReceived();
+
+        // ★ 从传感器队列读取步数（消费）
+        xQueueReceive(queueSensorDataBtHandle, &sensor, 0);
+
+        // ★ 查看时间数据（不消费，使用 xQueuePeek）
+        if (uxQueueMessagesWaiting(queueTimeUpdateHandle) > 0) {
+            xQueuePeek(queueTimeUpdateHandle, &time, 0);
+        }
+
+        // ★ 发送完整数据包
+        Bluetooth_SendFullData(&time, &sensor);
+
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(500));
+    }
+}
+/* USER CODE END 4 */
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM1) {
+    HAL_IncTick();
+  }
+}
+
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1) {}
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line) {}
+#endif

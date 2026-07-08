@@ -1,0 +1,6 @@
+../Core/Src/mpu6050.c:8:16:MPU6050_WriteReg	1
+../Core/Src/mpu6050.c:13:16:MPU6050_ReadReg	1
+../Core/Src/mpu6050.c:18:16:MPU6050_ReadRegs	1
+../Core/Src/mpu6050.c:26:9:MPU6050_Init	9
+../Core/Src/mpu6050.c:49:6:MPU6050_ReadAll	2
+../Core/Src/mpu6050.c:93:10:MPU6050_GetSteps	16
